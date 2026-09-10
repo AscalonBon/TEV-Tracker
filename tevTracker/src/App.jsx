@@ -10,9 +10,21 @@ const createEmptyRow = (date = '') => ({
   transportationCost: '',
 })
 
+const defaultAuthForm = {
+  name: '',
+  email: '',
+  password: '',
+  role: 'client',
+}
+
 function App() {
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
   const backupApiUrl = 'http://localhost:5001/api'
+  const [currentUser, setCurrentUser] = useState(null)
+  const [authMode, setAuthMode] = useState('login')
+  const [authForm, setAuthForm] = useState(defaultAuthForm)
+  const [authError, setAuthError] = useState('')
+  const [authLoading, setAuthLoading] = useState(false)
   const [itineraries, setItineraries] = useState([])
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(true)
@@ -29,12 +41,20 @@ function App() {
 
   const requestJson = async (path, options = {}) => {
     const urls = [apiUrl, backupApiUrl].filter(Boolean)
+    const token = localStorage.getItem('tevtracker_token')
+    const requestOptions = {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    }
 
     let lastError = null
 
     for (const baseUrl of urls) {
       try {
-        const response = await fetch(`${baseUrl}${path}`, options)
+        const response = await fetch(`${baseUrl}${path}`, requestOptions)
         const data = await response.json()
 
         if (!response.ok) {
@@ -50,6 +70,16 @@ function App() {
     throw lastError || new Error('Request failed.')
   }
 
+  const fetchCurrentUser = async () => {
+    try {
+      const user = await requestJson('/auth/me')
+      setCurrentUser(user)
+    } catch (error) {
+      localStorage.removeItem('tevtracker_token')
+      setCurrentUser(null)
+    }
+  }
+
   const fetchItineraries = async () => {
     try {
       const data = await requestJson('/trips')
@@ -62,8 +92,26 @@ function App() {
   }
 
   useEffect(() => {
-    fetchItineraries()
+    const token = localStorage.getItem('tevtracker_token')
+
+    if (token) {
+      fetchCurrentUser().then(() => {
+        fetchItineraries()
+      })
+      return
+    }
+
+    setIsLoading(false)
   }, [])
+
+  useEffect(() => {
+    if (!currentUser) {
+      setItineraries([])
+      return
+    }
+
+    fetchItineraries()
+  }, [currentUser])
 
   const sortedItineraries = useMemo(
     () =>
@@ -101,6 +149,51 @@ function App() {
       ([firstDate], [secondDate]) => new Date(firstDate) - new Date(secondDate),
     )
   }, [itineraries])
+
+  const isAdmin = currentUser?.role === 'admin'
+
+  const handleAuthChange = (field, value) => {
+    setAuthForm((prevForm) => ({
+      ...prevForm,
+      [field]: value,
+    }))
+  }
+
+  const handleAuthSubmit = async (event) => {
+    event.preventDefault()
+    setAuthError('')
+    setAuthLoading(true)
+
+    try {
+      const endpoint = authMode === 'login' ? '/auth/login' : '/auth/register'
+      const payload = authMode === 'login'
+        ? { email: authForm.email, password: authForm.password }
+        : authForm
+
+      const result = await requestJson(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+
+      localStorage.setItem('tevtracker_token', result.token)
+      setCurrentUser(result.user)
+      setAuthForm(defaultAuthForm)
+    } catch (error) {
+      setAuthError(error.message)
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('tevtracker_token')
+    setCurrentUser(null)
+    setItineraries([])
+    setError('')
+  }
 
   const openModal = () => {
     const today = new Date().toISOString().slice(0, 10)
@@ -320,13 +413,110 @@ function App() {
     }
   }
 
+  if (!currentUser) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <div className="auth-header">
+            <p className="eyebrow">TEV Tracker</p>
+            <h1>{authMode === 'login' ? 'Welcome back' : 'Create account'}</h1>
+          </div>
+
+          <div className="auth-toggle">
+            <button
+              type="button"
+              className={authMode === 'login' ? 'tab-button active' : 'tab-button'}
+              onClick={() => setAuthMode('login')}
+            >
+              Login
+            </button>
+            <button
+              type="button"
+              className={authMode === 'register' ? 'tab-button active' : 'tab-button'}
+              onClick={() => setAuthMode('register')}
+            >
+              Create account
+            </button>
+          </div>
+
+          <form onSubmit={handleAuthSubmit} className="auth-form">
+            {authMode === 'register' && (
+              <label>
+                <span>Full name</span>
+                <input
+                  type="text"
+                  value={authForm.name}
+                  onChange={(event) => handleAuthChange('name', event.target.value)}
+                  placeholder="Enter full name"
+                  required
+                />
+              </label>
+            )}
+
+            <label>
+              <span>Email</span>
+              <input
+                type="email"
+                value={authForm.email}
+                onChange={(event) => handleAuthChange('email', event.target.value)}
+                placeholder="name@example.com"
+                required
+              />
+            </label>
+
+            <label>
+              <span>Password</span>
+              <input
+                type="password"
+                value={authForm.password}
+                onChange={(event) => handleAuthChange('password', event.target.value)}
+                placeholder="Enter password"
+                required
+              />
+            </label>
+
+            {authMode === 'register' && (
+              <label>
+                <span>Account type</span>
+                <select
+                  value={authForm.role}
+                  onChange={(event) => handleAuthChange('role', event.target.value)}
+                >
+                  <option value="client">Client</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+            )}
+
+            {authError && <p className="error-message">{authError}</p>}
+
+            <button type="submit" className="primary-button auth-button" disabled={authLoading}>
+              {authLoading ? 'Please wait...' : authMode === 'login' ? 'Login' : 'Create account'}
+            </button>
+          </form>
+        </section>
+      </main>
+    )
+  }
+
   return (
     <main className="app-shell">
       <section className="panel hero-panel">
-        <div>
-          <p className="eyebrow">Travel records</p>
-          <h1>TEV Tracker</h1>
+        <div className="topbar-row">
+          <div>
+            <p className="eyebrow">Travel records</p>
+            <h1>TEV Tracker</h1>
+          </div>
+
+          <div className="user-badge">
+            <strong>{currentUser.name}</strong>
+            <span>{currentUser.role}</span>
+            <button type="button" className="secondary-button small-button" onClick={handleLogout}>
+              Logout
+            </button>
+          </div>
         </div>
+
         <p className="subtitle">
           Manage your travel itinerary with dates, transport details, and total travel cost.
         </p>
@@ -334,15 +524,17 @@ function App() {
 
       <section className="panel form-panel">
         <div className="section-title-row">
-          <h2>Add itinerary</h2>
-          <div className="button-stack">
-            <button className="primary-button" type="button" onClick={openModal}>
-              + Add trip plan
-            </button>
-            <button className="danger-button" type="button" onClick={handleDeleteAllRecords}>
-              Delete all entries
-            </button>
-          </div>
+          <h2>{isAdmin ? 'Admin itinerary actions' : 'Trip overview'}</h2>
+          {isAdmin && (
+            <div className="button-stack">
+              <button className="primary-button" type="button" onClick={openModal}>
+                + Add trip plan
+              </button>
+              <button className="danger-button" type="button" onClick={handleDeleteAllRecords}>
+                Delete all entries
+              </button>
+            </div>
+          )}
         </div>
 
         {error && <p className="error-message">{error}</p>}
@@ -366,7 +558,7 @@ function App() {
                 <th>Arrival time</th>
                 <th>Means of transportation</th>
                 <th>Transportation cost</th>
-                <th>Action</th>
+                {isAdmin && <th>Action</th>}
               </tr>
             </thead>
 
@@ -380,29 +572,31 @@ function App() {
                     <td>{itinerary.arrivalTime}</td>
                     <td>{itinerary.meansOfTransportation}</td>
                     <td>${Number(itinerary.transportationCost).toFixed(2)}</td>
-                    <td className="action-cell">
-                      <div className="row-actions">
-                        <button
-                          type="button"
-                          className="secondary-button small-button"
-                          onClick={() => openEditModal(itinerary)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="danger-button small-button"
-                          onClick={() => handleDeleteRecord(itinerary)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
+                    {isAdmin && (
+                      <td className="action-cell">
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            className="secondary-button small-button"
+                            onClick={() => openEditModal(itinerary)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="danger-button small-button"
+                            onClick={() => handleDeleteRecord(itinerary)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan="8" className="empty-state">
+                  <td colSpan={isAdmin ? 8 : 7} className="empty-state">
                     {isLoading ? 'Loading itinerary entries...' : 'No itinerary entries saved yet.'}
                   </td>
                 </tr>
@@ -444,13 +638,15 @@ function App() {
                   <span>{date}</span>
                   <strong>${Number(total).toFixed(2)}</strong>
                 </div>
-                <button
-                  type="button"
-                  className="danger-button small-button"
-                  onClick={() => handleDeleteAllForDate(date)}
-                >
-                  Delete date
-                </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="danger-button small-button"
+                    onClick={() => handleDeleteAllForDate(date)}
+                  >
+                    Delete date
+                  </button>
+                )}
               </div>
             ))
           ) : (
